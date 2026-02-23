@@ -42,18 +42,28 @@ class SecretView(discord.ui.View):
 
         await interaction.response.defer(ephemeral=True)
 
+        files_to_send = []
+
+        # Lógica de texto inteligente (Descripión vs .txt)
+        descripcion_embed = "Este contenido es invisible para los demás."
+
+        if self.secret_text:
+            if len(self.secret_text) <= 4096:
+                descripcion_embed = self.secret_text
+            else:
+                buffer_texto = io.BytesIO(self.secret_text.encode('utf-8'))
+                archivo_texto = discord.File(buffer_texto, filename="mensaje_secreto.txt")
+                files_to_send.append(archivo_texto)
+                descripcion_embed = "📜 **El texto es muy largo**, te lo envío como archivo adjunto."
+
         embed = discord.Embed(
             title="🕵️ Archivo Clasificado", 
-            description="Este contenido es invisible para los demás.",
+            description=descripcion_embed,
             color=discord.Color.green()
         )
         embed.set_footer(text="Mensaje seguro vía Bot.")
 
-        if self.secret_text:
-            embed.add_field(name="Mensaje:", value=self.secret_text, inline=False)
-
-        files_to_send = []
-
+        # Lógica de archivos
         if self.file_url:
             async with aiohttp.ClientSession() as session:
                 async with session.get(self.file_url) as resp:
@@ -71,31 +81,36 @@ class SecretView(discord.ui.View):
         await interaction.followup.send(embed=embed, files=files_to_send, ephemeral=True)
 
 # -----------------------------------------------------------
-# 4. LA NUEVA VISTA DE SELECCIÓN (EL MENÚ DE USUARIOS)
+# 4. LA NUEVA VISTA DE SELECCIÓN (CORREGIDA PARA EL REMITENTE)
 # -----------------------------------------------------------
 class RecipientSelect(discord.ui.UserSelect):
     def __init__(self, parent_view):
-        # max_values=25 es el límite de Discord por menú
         super().__init__(placeholder="Busca y selecciona a los destinatarios...", min_values=1, max_values=25)
         self.parent_view = parent_view
 
     async def callback(self, interaction: discord.Interaction):
-        # Esta función se ejecuta cuando el usuario selecciona gente y cierra el menú
+        # 1. Obtenemos a los destinatarios elegidos
+        selected_users = self.values 
         
-        # Guardamos los usuarios seleccionados
-        selected_users = self.values # Lista de usuarios seleccionados
-        
-        # Recuperamos los datos que guardamos en la vista padre
+        # 2. Recuperamos datos
         mensaje = self.parent_view.secret_text
         url_archivo = self.parent_view.file_url
         nombre_archivo = self.parent_view.filename
         original_sender = self.parent_view.sender
 
-        # Creamos la vista final (el candado) con la lista de usuarios elegidos
-        final_view = SecretView(allowed_users=selected_users, secret_text=mensaje, file_url=url_archivo, filename=nombre_archivo)
+        # --- AQUÍ ESTÁ EL ARREGLO ---
+        # Creamos una lista final de permisos que incluya a los elegidos + EL CREADOR
+        lista_permisos = list(selected_users)
+        if original_sender not in lista_permisos:
+            lista_permisos.append(original_sender)
+        # -----------------------------
 
-        # Construimos el mensaje público
+        # Creamos el candado con la lista que INCLUYE al creador
+        final_view = SecretView(allowed_users=lista_permisos, secret_text=mensaje, file_url=url_archivo, filename=nombre_archivo)
+
+        # Construimos el mensaje público (Solo mencionamos a los destinatarios para que se vea bien)
         menciones = ", ".join([u.mention for u in selected_users])
+        
         embed_publico = discord.Embed(
             title="📨 Mensaje Protegido",
             description=f"{original_sender.mention} ha enviado un contenido secreto para: {menciones}.",
@@ -104,11 +119,7 @@ class RecipientSelect(discord.ui.UserSelect):
         embed_publico.set_thumbnail(url="https://cdn-icons-png.flaticon.com/512/3064/3064197.png") 
         embed_publico.add_field(name="Instrucciones", value="Haz clic en el botón de abajo para verificar tu identidad.")
 
-        # ENVIAMOS EL MENSAJE PÚBLICO AL CANAL
-        # Usamos interaction.channel.send porque interaction.response ya se usó para el menú
         await interaction.channel.send(embed=embed_publico, view=final_view)
-
-        # Avisamos al remitente que ya se envió y borramos el menú de selección
         await interaction.response.edit_message(content=f"✅ ¡Enviado exitosamente a {len(selected_users)} personas!", view=None)
 
 class RecipientSelectView(discord.ui.View):
@@ -118,8 +129,6 @@ class RecipientSelectView(discord.ui.View):
         self.secret_text = secret_text
         self.file_url = file_url
         self.filename = filename
-        
-        # Añadimos el componente de selección a esta vista
         self.add_item(RecipientSelect(self))
 
 # -----------------------------------------------------------
@@ -148,11 +157,8 @@ async def secreto(interaction: discord.Interaction, mensaje: str = None, archivo
     url_archivo = archivo.url if archivo else None
     nombre_archivo = archivo.filename if archivo else "archivo"
 
-    # AQUÍ ESTÁ EL CAMBIO:
-    # No pedimos usuario todavía. Creamos la vista de selección.
     view = RecipientSelectView(sender=interaction.user, secret_text=mensaje, file_url=url_archivo, filename=nombre_archivo)
 
-    # Enviamos un mensaje EFÍMERO (solo tú lo ves) con el menú para elegir gente
     await interaction.response.send_message(
         "📂 **Contenido cargado.** \n👇 Ahora selecciona abajo quiénes podrán verlo (puedes elegir varios):", 
         view=view, 
